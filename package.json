@@ -26,6 +26,7 @@
     "next": "16.1.5",
     "react": "19.2.3",
     "react-dom": "19.2.3",
+    "socialfi": "^0.1.14",
     "ws": "^8.18.3"
   },
   "devDependencies": {
