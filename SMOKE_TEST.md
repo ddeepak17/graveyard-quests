@@ -1,229 +1,212 @@
-# Smoke Test – Graveyard Quests (Tapestry integration)
+# Smoke Test — Graveyard Quests
 
-## Tapestry API base
+> **5-minute Golden Path.** A judge can validate every feature by running these steps in order.
 
-All server-side fetch calls hit `https://api.usetapestry.dev/api/v1` (confirmed from live OpenAPI spec).
+## Setup
 
-## Correct Tapestry endpoint map
-
-| Operation | Method | Path |
-|-----------|--------|------|
-| Create / find profile | POST | `/profiles/findOrCreate` |
-| Create content (post) | POST | `/contents/findOrCreate` |
-| List content by profile | GET | `/contents/` + `?profileId=...&pageSize=...&page=...` |
-
-> `/contents/create` and `/contents/profile/{id}` do **not exist** in the spec and will 404.
-
-## Content body shape
-
-`POST /contents/findOrCreate` expects:
-```json
-{
-  "id": "<uuid>",
-  "profileId": "<profile.id from findOrCreate response>",
-  "properties": [{ "key": "text", "value": "the post content" }]
-}
-```
-The `id` must be unique per content node; the route uses `crypto.randomUUID()`.
-
----
-
-## Pre-requisites
-
-- `TAPESTRY_API_KEY` is set in `.env.local`
-- Phantom wallet browser extension is installed
-- Dev server is running: `npm run dev`
-
----
-
-## curl smoke-test commands (replace `KEY` and `WALLET` values)
-
-### 1 – Create / find profile
 ```bash
-curl -s -X POST \
-  "https://api.usetapestry.dev/api/v1/profiles/findOrCreate?apiKey=<KEY>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "walletAddress": "<WALLET>",
-    "username": "smoketest",
-    "bio": "",
-    "blockchain": "SOLANA",
-    "execution": "FAST_UNCONFIRMED"
-  }' | jq .
-```
-Expected: `{ "profile": { "id": "smoketest", "namespace": "...", ... }, "operation": "CREATED"|"FOUND", ... }`
+# .env.local must exist with your Tapestry API key
+echo "TAPESTRY_API_KEY=your_key_here" > .env.local
 
-### 2 – Create a post (via Next.js route)
+npm install
+npm run dev        # http://localhost:3000
+```
+
+Set your wallet address once (used in all curl commands below):
+
+```bash
+WALLET="YOUR_WALLET_ADDRESS"
+```
+
+---
+
+## Step 1 — Profile (Tapestry: `POST /profiles/findOrCreate`)
+
+```bash
+curl -s -X POST http://localhost:3000/api/tapestry/profile \
+  -H "Content-Type: application/json" \
+  -d "{\"walletAddress\":\"${WALLET}\"}" | jq '{id: .profile.id, op: .operation}'
+```
+
+**Expected:** `{ "id": "user_XXXXXX", "op": "CREATED" }` (or `"FOUND"` on repeat).
+
+---
+
+## Step 2 — Create a post (Tapestry: `POST /contents/findOrCreate`)
+
 ```bash
 curl -s -X POST http://localhost:3000/api/tapestry/post \
   -H "Content-Type: application/json" \
-  -d '{
-    "walletAddress": "<WALLET>",
-    "text": "smoke test post"
-  }' | jq .
-```
-Expected: `{ "id": "<uuid>", "namespace": "...", "created_at": ... }` (ContentSchema)
-
-### 3 – Load feed (via Next.js route)
-```bash
-curl -s \
-  "http://localhost:3000/api/tapestry/feed?walletAddress=<WALLET>&pageSize=5&page=1" \
-  | jq '.contents | length, .[0].content.text'
-```
-Expected: a non-zero count and `"smoke test post"` (or your last posted text) for the first item.
-
-### 4 – Like / Unlike a post (via Next.js route)
-
-Set your values once, then run the like and unlike commands:
-
-```bash
-WALLET="<your-wallet-address>"   # e.g. "AbCd...1234"
-
-# Fetch the first content id from the feed
-CONTENT_ID=$(curl -s \
-  "http://localhost:3000/api/tapestry/feed?walletAddress=${WALLET}&pageSize=5&page=1" \
-  | jq -r '.contents[0].content.id')
-
-echo "CONTENT_ID=${CONTENT_ID}"
+  -d "{\"walletAddress\":\"${WALLET}\",\"text\":\"smoke test post\"}" | jq '{id: .id}'
 ```
 
-```bash
-# Like
-curl -s -X POST http://localhost:3000/api/tapestry/like \
-  -H "Content-Type: application/json" \
-  -d "{\"walletAddress\":\"${WALLET}\",\"contentId\":\"${CONTENT_ID}\",\"action\":\"like\"}" \
-  | jq .
-```
-Expected: `{}` or `{ "success": true }` (Tapestry returns an empty 200 body).
-
-```bash
-# Unlike
-curl -s -X POST http://localhost:3000/api/tapestry/like \
-  -H "Content-Type: application/json" \
-  -d "{\"walletAddress\":\"${WALLET}\",\"contentId\":\"${CONTENT_ID}\",\"action\":\"unlike\"}" \
-  | jq .
-```
-Expected: `{}` or `{ "success": true }`.
-
-**Verify like incremented:**
-```bash
-curl -s \
-  "http://localhost:3000/api/tapestry/feed?walletAddress=${WALLET}&pageSize=5&page=1" \
-  | jq ".contents[] | select(.content.id==\"${CONTENT_ID}\") | .socialCounts.likeCount"
-```
-Expected: count is **1** (or N+1 vs before the like).
-
-**Verify unlike decremented:**
-```bash
-# Run unlike first (command above), then re-check the count
-curl -s \
-  "http://localhost:3000/api/tapestry/feed?walletAddress=${WALLET}&pageSize=5&page=1" \
-  | jq ".contents[] | select(.content.id==\"${CONTENT_ID}\") | .socialCounts.likeCount"
-```
-Expected: count is **0** (or N, back to the value before the like).
-
-### 5 – Create a comment (via Next.js route)
-
-> Uses `WALLET` and `CONTENT_ID` set in step 4.
-
-```bash
-# Post a comment
-curl -s -X POST http://localhost:3000/api/tapestry/comment \
-  -H "Content-Type: application/json" \
-  -d "{\"walletAddress\":\"${WALLET}\",\"contentId\":\"${CONTENT_ID}\",\"text\":\"smoke test comment\"}" \
-  | jq .
-```
-Expected: `{ "id": "<uuid>", "created_at": <timestamp>, "text": "smoke test comment" }` (CommentSchema).
-
-### 6 – List comments for a post (via Next.js route)
-
-```bash
-curl -s \
-  "http://localhost:3000/api/tapestry/comments?contentId=${CONTENT_ID}&pageSize=10&page=1" \
-  | jq '.comments | length, .[0].comment.text, .[0].author.username'
-```
-Expected: count ≥ 1, `"smoke test comment"` as the text, and the commenter's username.
-
-**Verify commentCount incremented in feed:**
-```bash
-curl -s \
-  "http://localhost:3000/api/tapestry/feed?walletAddress=${WALLET}&pageSize=5&page=1" \
-  | jq ".contents[] | select(.content.id==\"${CONTENT_ID}\") | .socialCounts.commentCount"
-```
-Expected: count is **1** (or N+1 vs before the comment).
+**Expected:** `{ "id": "<uuid>" }` — ContentSchema returned.
 
 ---
 
-## Manual browser tests
+## Step 3 — Feed shows the post (Tapestry: `GET /contents/`)
 
-### Test 1 – Profile: create / load
+```bash
+curl -s "http://localhost:3000/api/tapestry/feed?walletAddress=${WALLET}&pageSize=5&page=1" \
+  | jq '{count: (.contents | length), firstText: .contents[0].content.text}'
+```
 
-1. Open `http://localhost:3000/profile`.
-2. Click **Connect Phantom** and approve.
-3. (Optional) enter username and bio.
-4. Click **Create / Load Profile**.  
-   Expected: JSON response with `profile.id` and `profile.namespace`. No error banner.
-5. Click again.  
-   Expected: same `profile.id`, `operation: "FOUND"`.
+**Expected:** `count ≥ 1`, `firstText` is `"smoke test post"`.
 
-### Test 2 – Feed: create a post
+---
 
-1. Open `http://localhost:3000/feed` and connect Phantom.
-2. Type a message and click **Post**.  
-   Expected: text clears, feed auto-refreshes, no error banner.
+## Step 4 — Like + verify count (Tapestry: `POST /likes/{id}`)
 
-### Test 3 – Feed: verify post appears
+```bash
+CONTENT_ID=$(curl -s \
+  "http://localhost:3000/api/tapestry/feed?walletAddress=${WALLET}&pageSize=5&page=1" \
+  | jq -r '.contents[0].content.id')
+echo "CONTENT_ID=${CONTENT_ID}"
 
-1. Click **Load** on the feed page.  
-   Expected: cards appear; the post you just created shows its text.
-2. Click **Show raw JSON** to verify the `contents` array shape.
-3. Click **Show cards** to return.
+# Like
+curl -s -X POST http://localhost:3000/api/tapestry/like \
+  -H "Content-Type: application/json" \
+  -d "{\"walletAddress\":\"${WALLET}\",\"contentId\":\"${CONTENT_ID}\",\"action\":\"like\"}" | jq .
 
-### Test 4 – Comments: view and post
+# Verify likeCount = 1
+curl -s "http://localhost:3000/api/tapestry/feed?walletAddress=${WALLET}&pageSize=5&page=1" \
+  | jq ".contents[] | select(.content.id==\"${CONTENT_ID}\") | .socialCounts.likeCount"
+```
 
-1. Load the feed and connect Phantom.
-2. Click **💬 N comments** on any post card.  
-   Expected: section expands; existing comments render (author + text + timestamp). If none: "No comments yet."
-3. Type a comment in the input and click **Send** (or press Enter).  
-   Expected: input clears, comment list reloads showing the new comment, commentCount in the button increments.
-4. Collapse and re-expand the section.  
-   Expected: comments reload from the server and still show the posted comment.
-5. Reload the page, load feed, re-expand comments.  
-   Expected: comment persists (stored in Tapestry).
+**Expected:** `1` (or previous count + 1).
 
-### Test 6 – Like / Unlike a post
+---
 
-1. Load the feed and connect Phantom.
-2. Click **♡ Like** on any post card.  
-   Expected: button changes to **♥ Liked** (purple tint), like count increments after feed refresh.
-3. Click **♥ Liked** on the same post.  
-   Expected: button reverts to **♡ Like**, like count decrements after refresh.
-4. Reload the page and re-load the feed.  
-   Expected: likeCount persists (stored in Tapestry); button starts unlocked until you interact again.
+## Step 5 — Unlike + verify count (Tapestry: `DELETE /likes/{id}`)
 
-### Test 7 – Error handling (optional / destructive)
+```bash
+curl -s -X POST http://localhost:3000/api/tapestry/like \
+  -H "Content-Type: application/json" \
+  -d "{\"walletAddress\":\"${WALLET}\",\"contentId\":\"${CONTENT_ID}\",\"action\":\"unlike\"}" | jq .
 
-1. Set `TAPESTRY_API_KEY=bad_key` in `.env.local`, restart dev server.
-2. Attempt to post.  
-   Expected: red banner with `"Tapestry profile error"` or `"Tapestry content error"` and upstream `details` text — no API key visible.
-3. Restore real key, restart.
+# Verify likeCount decremented
+curl -s "http://localhost:3000/api/tapestry/feed?walletAddress=${WALLET}&pageSize=5&page=1" \
+  | jq ".contents[] | select(.content.id==\"${CONTENT_ID}\") | .socialCounts.likeCount"
+```
+
+**Expected:** `0` (or previous count - 1).
+
+---
+
+## Step 6 — Comment + verify count (Tapestry: `POST /comments/`)
+
+```bash
+curl -s -X POST http://localhost:3000/api/tapestry/comment \
+  -H "Content-Type: application/json" \
+  -d "{\"walletAddress\":\"${WALLET}\",\"contentId\":\"${CONTENT_ID}\",\"text\":\"smoke test comment\"}" \
+  | jq '{id: .id, text: .text}'
+
+# Verify commentCount = 1
+curl -s "http://localhost:3000/api/tapestry/feed?walletAddress=${WALLET}&pageSize=5&page=1" \
+  | jq ".contents[] | select(.content.id==\"${CONTENT_ID}\") | .socialCounts.commentCount"
+
+# List comments
+curl -s "http://localhost:3000/api/tapestry/comments?contentId=${CONTENT_ID}&pageSize=10&page=1" \
+  | jq '{count: (.comments | length), text: .comments[0].comment.text}'
+```
+
+**Expected:** `commentCount = 1`, comment list shows `"smoke test comment"`.
+
+---
+
+## Step 7 — Create a quest (Tapestry: `POST /contents/findOrCreate` with properties)
+
+```bash
+curl -s -X POST http://localhost:3000/api/tapestry/quest \
+  -H "Content-Type: application/json" \
+  -d "{\"walletAddress\":\"${WALLET}\",\"title\":\"Defeat the Lich King\",\"reward\":\"50 SOL\",\"details\":\"Complete all dungeon levels.\"}" \
+  | jq '{id: .id}'
+
+# Verify quest in feed
+QUEST_ID=$(curl -s \
+  "http://localhost:3000/api/tapestry/feed?walletAddress=${WALLET}&pageSize=20&page=1" \
+  | jq -r '[.contents[] | select(.content.text | startswith("[QUEST]"))][0].content.id')
+echo "QUEST_ID=${QUEST_ID}"
+
+curl -s "http://localhost:3000/api/tapestry/feed?walletAddress=${WALLET}&pageSize=20&page=1" \
+  | jq ".contents[] | select(.content.id==\"${QUEST_ID}\") | {text: .content.text}"
+```
+
+**Expected:** `text` starts with `"[QUEST] Defeat the Lich King — Reward: 50 SOL"`.
+
+---
+
+## Step 8 — Mark complete (comment proof)
+
+```bash
+curl -s -X POST http://localhost:3000/api/tapestry/comment \
+  -H "Content-Type: application/json" \
+  -d "{\"walletAddress\":\"${WALLET}\",\"contentId\":\"${QUEST_ID}\",\"text\":\"✅ Completed: Cleared all levels\\nTx: (manual test)\"}" \
+  | jq '{id: .id, text: .text}'
+```
+
+**Expected:** Comment created with `✅ Completed:` prefix and `Tx:` line.
+
+> **Onchain Memo (optional, browser only):** Connect Phantom on devnet with ~0.001 SOL. Open Quests tab, type proof, click ✅ Complete. Phantom prompts for a Memo tx. Approve → comment includes a real Solana tx signature. Verify at `https://explorer.solana.com/tx/<sig>?cluster=devnet`.
+
+---
+
+## Step 9 — Rewards / leaderboard (Torque layer: `GET /api/rewards`)
+
+```bash
+curl -s "http://localhost:3000/api/rewards?walletAddress=${WALLET}" \
+  | jq '{points: .totalPoints, posts: .breakdown.posts, quests: .breakdown.quests, completions: .breakdown.completions, leaderboard: [.leaderboard[] | {rank, username, points}], computedAt: .computedAt}'
+```
+
+**Expected:**
+- `totalPoints > 0` (at minimum: 1 post × 10 + 1 quest × 20 + engagement).
+- `breakdown` shows non-zero counts for posts and quests.
+- `leaderboard` has at least one entry.
+- `computedAt` is an ISO timestamp.
+
+---
+
+## Step 10 — Browser walkthrough (2 minutes)
+
+1. Open `http://localhost:3000/feed`, connect Phantom.
+2. Click **Demo seed** — creates quest + post + comment + like.
+3. Verify **All Posts** tab: both cards visible, like counts, comment counts.
+4. Switch to **⚔️ Quests** tab: only quest cards, **⚔️ QUEST** badge, title, reward.
+5. Switch to **My Activity** tab: shows only your authored posts and quest completions.
+6. Click **💬** on any card: comments expand, type + send a new comment.
+7. Click **♡** on any card: toggles to **♥**, count increments.
+8. On a quest card, type proof in **Mark Complete**, click **✅ Complete**.
+   - If Phantom is on devnet with SOL: approve tx → comment has `Tx: <sig>`.
+   - If no SOL or rejected: comment has `Tx: (failed to submit)`.
+9. Click **🏆 Rewards** in the header → `/rewards` page.
+   - Gold total points counter, breakdown table, leaderboard with your row highlighted.
+   - Click **↻ Refresh** — data updates.
+10. Disconnect wallet: feed shows placeholder, rewards shows "Connect Phantom" message.
 
 ---
 
 ## Pass criteria
 
 | Check | Expected |
-|-------|----------|
-| Profile created | `profile.id` in response, `operation: "CREATED"` |
+|---|---|
+| Profile create | `profile.id` returned, `operation: "CREATED"` |
 | Profile idempotent | Same `profile.id`, `operation: "FOUND"` |
-| Post created | ContentSchema `{ id, namespace, created_at }` returned, no error |
-| Post visible in feed | Card shows the post text under `@username` |
-| Raw JSON toggle | Switches between cards and raw JSON |
-| Like increments | likeCount +1, button shows ♥ Liked (optimistic then confirmed after refresh) |
-| Unlike decrements | likeCount -1, button reverts to ♡ Like after refresh |
-| Like count persists | After page reload and feed refresh, likeCount reflects server state |
-| Comment posted | CommentSchema `{ id, created_at, text }` returned, no error |
-| Comments listed | `{ comments: [...], page, pageSize }` — author + text visible in card |
-| commentCount increments | Feed shows updated count after posting a comment |
-| Comments persist | After page reload, comments still visible via list endpoint |
-| Bad key | Error banner with details, no key leak |
+| Post created | `{ id }` returned |
+| Post in feed | Card shows text, author, timestamp |
+| Like increments | `likeCount` + 1, button shows ♥ |
+| Unlike decrements | `likeCount` - 1, button shows ♡ |
+| Comment posted | `{ id, text }` returned |
+| Comments listed | Author + text visible in expanded panel |
+| commentCount increments | Feed count updates after comment |
+| Quest created | Text starts with `[QUEST]` |
+| Quest badge | ⚔️ QUEST badge, title, reward, details |
+| Quest filter | Quests tab: only quests; All Posts: everything |
+| My Activity tab | Shows only your posts/quests/completions |
+| Mark complete | `✅ Completed:` comment posted, comments expand |
+| Onchain proof (connected) | Phantom prompts, `Tx: <base58 sig>` in comment |
+| Onchain proof (failed) | `Tx: (failed to submit)`, no crash |
+| Demo seed | Creates quest + post + comment + like in one click |
+| Rewards page | Total points > 0, breakdown rows, leaderboard |
+| Rewards refresh | ↻ Refresh updates data |
+| Feed → Rewards nav | 🏆 Rewards link works |
+| No key leak | `TAPESTRY_API_KEY` never in browser, never in error messages |
