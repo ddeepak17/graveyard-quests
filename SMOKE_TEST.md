@@ -122,6 +122,36 @@ curl -s \
 ```
 Expected: count is **0** (or N, back to the value before the like).
 
+### 5 – Create a comment (via Next.js route)
+
+> Uses `WALLET` and `CONTENT_ID` set in step 4.
+
+```bash
+# Post a comment
+curl -s -X POST http://localhost:3000/api/tapestry/comment \
+  -H "Content-Type: application/json" \
+  -d "{\"walletAddress\":\"${WALLET}\",\"contentId\":\"${CONTENT_ID}\",\"text\":\"smoke test comment\"}" \
+  | jq .
+```
+Expected: `{ "id": "<uuid>", "created_at": <timestamp>, "text": "smoke test comment" }` (CommentSchema).
+
+### 6 – List comments for a post (via Next.js route)
+
+```bash
+curl -s \
+  "http://localhost:3000/api/tapestry/comments?contentId=${CONTENT_ID}&pageSize=10&page=1" \
+  | jq '.comments | length, .[0].comment.text, .[0].author.username'
+```
+Expected: count ≥ 1, `"smoke test comment"` as the text, and the commenter's username.
+
+**Verify commentCount incremented in feed:**
+```bash
+curl -s \
+  "http://localhost:3000/api/tapestry/feed?walletAddress=${WALLET}&pageSize=5&page=1" \
+  | jq ".contents[] | select(.content.id==\"${CONTENT_ID}\") | .socialCounts.commentCount"
+```
+Expected: count is **1** (or N+1 vs before the comment).
+
 ---
 
 ## Manual browser tests
@@ -149,7 +179,19 @@ Expected: count is **0** (or N, back to the value before the like).
 2. Click **Show raw JSON** to verify the `contents` array shape.
 3. Click **Show cards** to return.
 
-### Test 4 – Like / Unlike a post
+### Test 4 – Comments: view and post
+
+1. Load the feed and connect Phantom.
+2. Click **💬 N comments** on any post card.  
+   Expected: section expands; existing comments render (author + text + timestamp). If none: "No comments yet."
+3. Type a comment in the input and click **Send** (or press Enter).  
+   Expected: input clears, comment list reloads showing the new comment, commentCount in the button increments.
+4. Collapse and re-expand the section.  
+   Expected: comments reload from the server and still show the posted comment.
+5. Reload the page, load feed, re-expand comments.  
+   Expected: comment persists (stored in Tapestry).
+
+### Test 6 – Like / Unlike a post
 
 1. Load the feed and connect Phantom.
 2. Click **♡ Like** on any post card.  
@@ -159,7 +201,7 @@ Expected: count is **0** (or N, back to the value before the like).
 4. Reload the page and re-load the feed.  
    Expected: likeCount persists (stored in Tapestry); button starts unlocked until you interact again.
 
-### Test 6 – Error handling (optional / destructive)
+### Test 7 – Error handling (optional / destructive)
 
 1. Set `TAPESTRY_API_KEY=bad_key` in `.env.local`, restart dev server.
 2. Attempt to post.  
@@ -180,4 +222,8 @@ Expected: count is **0** (or N, back to the value before the like).
 | Like increments | likeCount +1, button shows ♥ Liked (optimistic then confirmed after refresh) |
 | Unlike decrements | likeCount -1, button reverts to ♡ Like after refresh |
 | Like count persists | After page reload and feed refresh, likeCount reflects server state |
+| Comment posted | CommentSchema `{ id, created_at, text }` returned, no error |
+| Comments listed | `{ comments: [...], page, pageSize }` — author + text visible in card |
+| commentCount increments | Feed shows updated count after posting a comment |
+| Comments persist | After page reload, comments still visible via list endpoint |
 | Bad key | Error banner with details, no key leak |
