@@ -165,7 +165,7 @@ export default function RewardsPage() {
               </button>
             ))}
             {connectors.length === 0 && (
-              <span style={{ fontSize: 13, opacity: 0.4 }}>No wallets detected. Install Phantom.</span>
+              <span style={{ fontSize: 13, opacity: 0.4 }}>No wallets detected — install Phantom or another Solana wallet.</span>
             )}
           </div>
         )}
@@ -182,7 +182,7 @@ export default function RewardsPage() {
             fontSize: 14,
           }}
         >
-          Connect Phantom to see your rewards.
+          Connect a Solana wallet to see your rewards.
         </div>
       )}
 

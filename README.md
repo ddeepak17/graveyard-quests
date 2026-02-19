@@ -2,7 +2,25 @@
 
 > Social questing on Solana — powered by [Tapestry](https://usetapestry.dev) onchain social graph + a [Torque](https://torque.so)-style loyalty layer.
 
-Connect a Phantom wallet, create posts and quests, like, comment, mark quests complete with an onchain Solana Memo proof, and track loyalty points on a live leaderboard — all persisted via Tapestry's content graph on devnet.
+Connect any Solana wallet (Phantom, Backpack, etc.), create posts and quests, like, comment, mark quests complete with an onchain Solana Memo proof, and track loyalty points on a live leaderboard — all persisted via Tapestry's content graph on devnet.
+
+---
+
+## Bounty Alignment
+
+### Tapestry (Onchain Social)
+
+- **Quests as social content** — quests are Tapestry content nodes with structured `properties` (`type`, `title`, `reward`, `details`). Because `content.properties` can be `null` in feed responses, we store a human-readable `[QUEST]` text fallback and detect quests via a three-tier check.
+- **Full social graph** — likes (`POST/DELETE /likes/{id}`), comments (`POST /comments/`, `GET /comments/`), and paginated feed (`GET /contents/`) are all live Tapestry calls made server-side.
+- **Completion proof stored as comment** — marking a quest complete posts `✅ Completed: <proof>` directly to Tapestry via `POST /comments/`, making the proof a first-class social object readable by anyone.
+- **Optional onchain anchor** — a Solana Memo transaction on devnet encodes the full proof string; the tx signature is embedded in the completion comment and rendered as a clickable Devnet Explorer link.
+- **Any Solana wallet** — uses the wallet-standard `signAndSendTransaction` feature with a `signTransaction` + manual RPC fallback, so Phantom, Backpack, and any other wallet-standard wallet works.
+
+### Torque (Loyalty)
+
+- **Rewards layer** — `GET /api/rewards` aggregates Tapestry social activity into a loyalty points score: posts +10, quests +20, quest completions +30, likes/comments received +1 each.
+- **Live leaderboard** — scored from the last 50 feed items + all their comments; recomputed server-side on demand, zero extra database.
+- **Torque-compatible** — data shape and scoring model are designed to plug into a production Torque loyalty program; swap the scoring backend for the real Torque API to go live.
 
 ---
 

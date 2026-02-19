@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect, type ReactNode } from "react";
 import { useWalletConnection } from "@solana/react-hooks";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -72,10 +72,13 @@ function extractQuestData(post: any): {
 
 // ─── Onchain proof helper ─────────────────────────────────────────────────────
 //
-// Builds a Solana Memo transaction on devnet and submits it via the connected
-// Phantom wallet using the wallet-standard signAndSendTransaction feature.
-// All Solana kit v2 modules are dynamically imported so they only load on the
-// client (never during SSR).
+// Builds a Solana Memo transaction on devnet and submits it via any connected
+// wallet that supports the wallet-standard. Tries signAndSendTransaction first
+// (Phantom, Backpack, etc.), then falls back to signTransaction + manual RPC
+// send for wallets that only support signing. All kit v2 modules are
+// dynamically imported so they only load on the client (never during SSR).
+
+const DEVNET_RPC = "https://api.devnet.solana.com";
 
 async function submitCompletionMemo({
   questId,
@@ -99,8 +102,8 @@ async function submitCompletionMemo({
   const { address } = await import("@solana/addresses");
   const { getUtf8Encoder, getBase58Decoder } = await import("@solana/codecs-strings");
 
-  // Fetch a recent blockhash from devnet
-  const rpc = createSolanaRpc("https://api.devnet.solana.com" as any);
+  // Always fetch blockhash from devnet — cluster must match the chain we send to
+  const rpc = createSolanaRpc(DEVNET_RPC as any);
   const { value: { blockhash, lastValidBlockHeight } } = await rpc.getLatestBlockhash().send();
 
   // Memo text — keep ≤ 120-char proof to stay well under the 566-byte tx limit
@@ -119,17 +122,74 @@ async function submitCompletionMemo({
   const compiledTx = compileTransaction(txMsg as any);
   const txBytes = getTransactionEncoder().encode(compiledTx) as Uint8Array;
 
-  const feature = walletObj?.features?.["solana:signAndSendTransaction"];
-  if (!feature) throw new Error("Wallet does not support signAndSendTransaction");
+  // Path A: wallet supports signAndSendTransaction (Phantom, Backpack, …)
+  const sendFeature = walletObj?.features?.["solana:signAndSendTransaction"];
+  if (sendFeature) {
+    const [output] = await sendFeature.signAndSendTransaction({
+      transaction: txBytes,
+      chain: "solana:devnet",
+      account: walletObj.account,
+    });
+    return getBase58Decoder().decode(output.signature as Uint8Array);
+  }
 
-  const [output] = await feature.signAndSendTransaction({
-    transaction: txBytes,
-    chain: "solana:devnet",
-    account: walletObj.account,
-  });
+  // Path B: wallet only supports signTransaction → we send it manually via RPC
+  const signFeature = walletObj?.features?.["solana:signTransaction"];
+  if (signFeature) {
+    const [signOutput] = await signFeature.signTransaction({
+      transaction: txBytes,
+      account: walletObj.account,
+    });
+    const signedBytes = signOutput.signedTransaction as Uint8Array;
+    // base64-encode for the JSON-RPC sendTransaction call
+    const base64Tx = btoa(
+      Array.from(signedBytes)
+        .map((b) => String.fromCharCode(b))
+        .join("")
+    );
+    const sig = await rpc
+      .sendTransaction(base64Tx as any, { encoding: "base64" } as any)
+      .send();
+    return sig as string;
+  }
 
-  // Signature bytes → base58 string (the familiar Solana tx ID)
-  return getBase58Decoder().decode(output.signature as Uint8Array);
+  throw new Error("Connected wallet does not support transaction signing");
+}
+
+// ─── Comment text renderer ───────────────────────────────────────────────────
+//
+// Splits on newlines. Lines matching "Tx: <base58sig>" become clickable
+// Devnet Explorer links so judges can verify the onchain Memo tx instantly.
+
+const TX_SIG_RE = /^Tx:\s*([1-9A-HJ-NP-Za-km-z]{32,90})$/;
+
+function renderCommentText(text: string): ReactNode {
+  const lines = text.split("\n");
+  return (
+    <>
+      {lines.map((line, i) => {
+        const m = line.match(TX_SIG_RE);
+        if (m) {
+          const sig = m[1];
+          return (
+            <div key={i} style={{ fontSize: 11, marginTop: 3, opacity: 0.7 }}>
+              {"Tx: "}
+              <a
+                href={`https://explorer.solana.com/tx/${sig}?cluster=devnet`}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: "#60a5fa", textDecoration: "underline", wordBreak: "break-all" }}
+                title="View on Solana Devnet Explorer"
+              >
+                {sig.slice(0, 8)}…{sig.slice(-6)}
+              </a>
+            </div>
+          );
+        }
+        return <div key={i}>{line}</div>;
+      })}
+    </>
+  );
 }
 
 // ─── Shared micro-styles ─────────────────────────────────────────────────────
@@ -215,7 +275,7 @@ function CommentPanel({
                 <span style={{ fontSize: 10, opacity: 0.35 }}>{timeAgo(cTs)}</span>
               )}
             </div>
-            <div style={{ fontSize: 13, lineHeight: 1.5, wordBreak: "break-word" }}>{cText}</div>
+            <div style={{ fontSize: 13, lineHeight: 1.5, wordBreak: "break-word" }}>{renderCommentText(cText)}</div>
           </div>
         );
       })}
@@ -523,8 +583,16 @@ export default function FeedPage() {
   const [completeProofs, setCompleteProofs] = useState<Record<string, string>>({});
   const [completingIds, setCompletingIds] = useState<Record<string, boolean>>({});
 
-  // Demo seed
+  // Demo seed — persisted per wallet so the button stays disabled after first run
   const [seedStatus, setSeedStatus] = useState<"idle" | "running" | "done">("idle");
+
+  // Restore "done" state from localStorage when wallet connects
+  useEffect(() => {
+    if (!walletAddress) return;
+    if (typeof window !== "undefined" && localStorage.getItem(`gq:seeded:${walletAddress}`)) {
+      setSeedStatus("done");
+    }
+  }, [walletAddress]);
 
   const allPosts: any[] = useMemo(() => {
     if (!feed) return [];
@@ -535,7 +603,10 @@ export default function FeedPage() {
     return [];
   }, [feed]);
 
-  const myUsername = useMemo(
+  // Tapestry stores profile id as "user_<first6>" — same value for both
+  // authorProfile.id and authorProfile.username in practice, but we check both
+  // to be safe against any future shape differences.
+  const myAuthorId = useMemo(
     () => walletAddress ? `user_${walletAddress.slice(0, 6)}` : "",
     [walletAddress]
   );
@@ -544,12 +615,14 @@ export default function FeedPage() {
     if (activeTab === "quests") return allPosts.filter((p) => extractQuestData(p).isQuest);
     if (activeTab === "mine") {
       return allPosts.filter((p) => {
-        const author: string = p?.authorProfile?.username ?? "";
-        return author === myUsername;
+        const ap = p?.authorProfile;
+        const byId = ap?.id && ap.id === myAuthorId;
+        const byUsername = ap?.username && ap.username === myAuthorId;
+        return byId || byUsername;
       });
     }
     return allPosts;
-  }, [allPosts, activeTab, myUsername]);
+  }, [allPosts, activeTab, myAuthorId]);
 
   // ── Handlers ──────────────────────────────────────────────────────────────
 
@@ -713,7 +786,10 @@ export default function FeedPage() {
             feePayer: walletAddress,
           });
           commentText = `✅ Completed: ${proof}\nTx: ${sig}`;
-        } catch {
+        } catch (txErr: any) {
+          if (process.env.NODE_ENV !== "production") {
+            console.warn("[graveyard-quests] Memo tx failed:", txErr?.message ?? txErr);
+          }
           commentText = `✅ Completed: ${proof}\nTx: (failed to submit)`;
         }
       }
@@ -737,7 +813,7 @@ export default function FeedPage() {
   }
 
   async function seedDemo() {
-    if (!walletAddress || seedStatus === "running") return;
+    if (!walletAddress || seedStatus === "running" || seedStatus === "done") return;
     setError(null);
     setSeedStatus("running");
     try {
@@ -787,7 +863,9 @@ export default function FeedPage() {
       await refreshFeed();
       setActiveTab("all");
       setSeedStatus("done");
-      setTimeout(() => setSeedStatus("idle"), 4000);
+      if (typeof window !== "undefined") {
+        localStorage.setItem(`gq:seeded:${walletAddress}`, "1");
+      }
     } catch (e: any) {
       setError(e?.message ?? "Seed failed");
       setSeedStatus("idle");
@@ -879,10 +957,12 @@ export default function FeedPage() {
           </div>
         ) : (
           <div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-              {connectors
-                .filter((c) => c.name?.toLowerCase().includes("phantom"))
-                .map((c) => (
+            <div>
+              <div style={{ fontSize: 12, opacity: 0.4, marginBottom: 8 }}>
+                Connect a Solana wallet to get started.
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {connectors.map((c) => (
                   <button
                     key={c.id}
                     onClick={async () => {
@@ -892,13 +972,19 @@ export default function FeedPage() {
                     }}
                     style={btnStyle(false)}
                   >
-                    Connect {c.name}
+                    {c.name}
                   </button>
                 ))}
+                {connectors.length === 0 && (
+                  <span style={{ fontSize: 13, opacity: 0.4 }}>
+                    No wallets detected — install Phantom or another Solana wallet.
+                  </span>
+                )}
+              </div>
+              {status === "connecting" && (
+                <div style={{ marginTop: 6, fontSize: 12, opacity: 0.45 }}>Connecting…</div>
+              )}
             </div>
-            {status === "connecting" && (
-              <div style={{ marginTop: 6, fontSize: 12, opacity: 0.45 }}>Connecting…</div>
-            )}
           </div>
         )}
       </div>
@@ -1142,7 +1228,7 @@ export default function FeedPage() {
           {/* Not connected + no feed */}
           {!connected && !feed && (
             <div style={{ textAlign: "center", padding: "36px 0", opacity: 0.35, fontSize: 14 }}>
-              Connect Phantom to load the feed.
+              Connect a Solana wallet to load the feed.
             </div>
           )}
 
