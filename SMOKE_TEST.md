@@ -36,7 +36,7 @@ The `id` must be unique per content node; the route uses `crypto.randomUUID()`.
 
 ---
 
-## 3 curl smoke-test commands (replace `<KEY>` and `<WALLET>`)
+## curl smoke-test commands (replace `KEY` and `WALLET` values)
 
 ### 1 – Create / find profile
 ```bash
@@ -67,10 +67,60 @@ Expected: `{ "id": "<uuid>", "namespace": "...", "created_at": ... }` (ContentSc
 ### 3 – Load feed (via Next.js route)
 ```bash
 curl -s \
-  "http://localhost:3000/api/tapestry/feed?walletAddress=<WALLET>&limit=5" \
+  "http://localhost:3000/api/tapestry/feed?walletAddress=<WALLET>&pageSize=5&page=1" \
   | jq '.contents | length, .[0].content.text'
 ```
 Expected: a non-zero count and `"smoke test post"` (or your last posted text) for the first item.
+
+### 4 – Like / Unlike a post (via Next.js route)
+
+Set your values once, then run the like and unlike commands:
+
+```bash
+WALLET="<your-wallet-address>"   # e.g. "AbCd...1234"
+
+# Fetch the first content id from the feed
+CONTENT_ID=$(curl -s \
+  "http://localhost:3000/api/tapestry/feed?walletAddress=${WALLET}&pageSize=5&page=1" \
+  | jq -r '.contents[0].content.id')
+
+echo "CONTENT_ID=${CONTENT_ID}"
+```
+
+```bash
+# Like
+curl -s -X POST http://localhost:3000/api/tapestry/like \
+  -H "Content-Type: application/json" \
+  -d "{\"walletAddress\":\"${WALLET}\",\"contentId\":\"${CONTENT_ID}\",\"action\":\"like\"}" \
+  | jq .
+```
+Expected: `{}` or `{ "success": true }` (Tapestry returns an empty 200 body).
+
+```bash
+# Unlike
+curl -s -X POST http://localhost:3000/api/tapestry/like \
+  -H "Content-Type: application/json" \
+  -d "{\"walletAddress\":\"${WALLET}\",\"contentId\":\"${CONTENT_ID}\",\"action\":\"unlike\"}" \
+  | jq .
+```
+Expected: `{}` or `{ "success": true }`.
+
+**Verify like incremented:**
+```bash
+curl -s \
+  "http://localhost:3000/api/tapestry/feed?walletAddress=${WALLET}&pageSize=5&page=1" \
+  | jq ".contents[] | select(.content.id==\"${CONTENT_ID}\") | .socialCounts.likeCount"
+```
+Expected: count is **1** (or N+1 vs before the like).
+
+**Verify unlike decremented:**
+```bash
+# Run unlike first (command above), then re-check the count
+curl -s \
+  "http://localhost:3000/api/tapestry/feed?walletAddress=${WALLET}&pageSize=5&page=1" \
+  | jq ".contents[] | select(.content.id==\"${CONTENT_ID}\") | .socialCounts.likeCount"
+```
+Expected: count is **0** (or N, back to the value before the like).
 
 ---
 
@@ -99,7 +149,17 @@ Expected: a non-zero count and `"smoke test post"` (or your last posted text) fo
 2. Click **Show raw JSON** to verify the `contents` array shape.
 3. Click **Show cards** to return.
 
-### Test 4 – Error handling (optional / destructive)
+### Test 4 – Like / Unlike a post
+
+1. Load the feed and connect Phantom.
+2. Click **♡ Like** on any post card.  
+   Expected: button changes to **♥ Liked** (purple tint), like count increments after feed refresh.
+3. Click **♥ Liked** on the same post.  
+   Expected: button reverts to **♡ Like**, like count decrements after refresh.
+4. Reload the page and re-load the feed.  
+   Expected: likeCount persists (stored in Tapestry); button starts unlocked until you interact again.
+
+### Test 6 – Error handling (optional / destructive)
 
 1. Set `TAPESTRY_API_KEY=bad_key` in `.env.local`, restart dev server.
 2. Attempt to post.  
@@ -117,4 +177,7 @@ Expected: a non-zero count and `"smoke test post"` (or your last posted text) fo
 | Post created | ContentSchema `{ id, namespace, created_at }` returned, no error |
 | Post visible in feed | Card shows the post text under `@username` |
 | Raw JSON toggle | Switches between cards and raw JSON |
+| Like increments | likeCount +1, button shows ♥ Liked (optimistic then confirmed after refresh) |
+| Unlike decrements | likeCount -1, button reverts to ♡ Like after refresh |
+| Like count persists | After page reload and feed refresh, likeCount reflects server state |
 | Bad key | Error banner with details, no key leak |

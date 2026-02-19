@@ -18,6 +18,9 @@ export default function FeedPage() {
   const [error, setError] = useState<string | null>(null);
   const [feed, setFeed] = useState<any>(null);
   const [showRaw, setShowRaw] = useState(false);
+  const [likingIds, setLikingIds] = useState<Record<string, boolean>>({});
+  // Local optimistic like state – used when requestingProfileSocialInfo.hasLiked is absent
+  const [likedIds, setLikedIds] = useState<Record<string, boolean>>({});
 
   // Normalise the feed response to an array of post objects
   const posts: any[] = useMemo(() => {
@@ -36,7 +39,7 @@ export default function FeedPage() {
     setLoadingFeed(true);
     try {
       const res = await fetch(
-        `/api/tapestry/feed?walletAddress=${encodeURIComponent(walletAddress)}&limit=20`
+        `/api/tapestry/feed?walletAddress=${encodeURIComponent(walletAddress)}&pageSize=20&page=1`
       );
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error ?? "Failed to load feed");
@@ -72,6 +75,35 @@ export default function FeedPage() {
       setError(e?.message ?? "Unknown error");
     } finally {
       setLoadingPost(false);
+    }
+  }
+
+  async function toggleLike(contentId: string, hasLiked: boolean) {
+    if (!walletAddress || likingIds[contentId]) return;
+    setLikingIds((prev) => ({ ...prev, [contentId]: true }));
+    // Optimistic update so the button flips immediately
+    setLikedIds((prev) => ({ ...prev, [contentId]: !hasLiked }));
+    try {
+      const res = await fetch("/api/tapestry/like", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          walletAddress,
+          contentId,
+          action: hasLiked ? "unlike" : "like",
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        // Roll back optimistic update on failure
+        setLikedIds((prev) => ({ ...prev, [contentId]: hasLiked }));
+        throw new Error(data?.error ?? "Failed to update like");
+      }
+      await refreshFeed();
+    } catch (e: any) {
+      setError(e?.message ?? "Unknown error");
+    } finally {
+      setLikingIds((prev) => ({ ...prev, [contentId]: false }));
     }
   }
 
@@ -202,13 +234,22 @@ export default function FeedPage() {
           ) : (
             <div style={{ display: "grid", gap: 10 }}>
               {posts.map((post: any, i: number) => {
-                // API response shape: { content: { id, created_at, text, ... }, authorProfile, socialCounts }
+                // API response shape: { content: { id, created_at, text, ... }, authorProfile, socialCounts, requestingProfileSocialInfo }
                 const contentObj = post?.content ?? post;
                 const textVal: string =
                   contentObj?.text ?? contentObj?.content ?? post?.text ?? "(no content)";
                 const author: string = post?.authorProfile?.username ?? "";
                 const ts: number | undefined = contentObj?.created_at;
                 const contentId: string = contentObj?.id ?? String(i);
+                const likeCount: number = post?.socialCounts?.likeCount ?? 0;
+                // Prefer authoritative server value when present; fall back to local optimistic state
+                const serverHasLiked: boolean | undefined =
+                  post?.requestingProfileSocialInfo?.hasLiked;
+                const hasLiked: boolean =
+                  contentId in likedIds
+                    ? likedIds[contentId]
+                    : serverHasLiked ?? false;
+                const isLiking = !!likingIds[contentId];
                 return (
                   <div
                     key={contentId}
@@ -220,9 +261,29 @@ export default function FeedPage() {
                       </div>
                     )}
                     <div style={{ marginBottom: 6, wordBreak: "break-word" }}>{textVal}</div>
-                    <div style={{ fontSize: 11, opacity: 0.5 }}>
-                      {contentId}
-                      {ts ? ` · ${new Date(ts < 1e12 ? ts * 1000 : ts).toLocaleString()}` : ""}
+                    <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 8 }}>
+                      <button
+                        onClick={() => toggleLike(contentId, hasLiked)}
+                        disabled={!connected || isLiking}
+                        style={{
+                          padding: "4px 10px",
+                          borderRadius: 8,
+                          border: `1px solid ${hasLiked ? "#c084fc" : "#555"}`,
+                          cursor: connected ? "pointer" : "not-allowed",
+                          opacity: isLiking ? 0.6 : 1,
+                          fontSize: 12,
+                          background: hasLiked ? "rgba(192,132,252,0.15)" : "transparent",
+                        }}
+                      >
+                        {isLiking ? "…" : hasLiked ? "♥ Liked" : "♡ Like"}
+                      </button>
+                      <span style={{ fontSize: 12, opacity: 0.6 }}>
+                        {likeCount} {likeCount === 1 ? "like" : "likes"}
+                      </span>
+                      <span style={{ fontSize: 11, opacity: 0.5, marginLeft: "auto" }}>
+                        {contentId}
+                        {ts ? ` · ${new Date(ts < 1e12 ? ts * 1000 : ts).toLocaleString()}` : ""}
+                      </span>
                     </div>
                   </div>
                 );
